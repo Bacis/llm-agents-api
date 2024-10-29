@@ -1,0 +1,87 @@
+.venv/
+archive/
+wip/
+# Byte-compiled Python files
+__pycache__/
+*.py[cod]
+
+# Python environments
+.env
+
+# Jupyter Notebook checkpoints (if applicable)
+.ipynb_checkpoints/
+
+# Distribution / build directories
+build/
+dist/
+*.egg-info/
+pip-wheel-metadata/
+.wheels/
+
+# Python-specific packaging files
+*.egg
+*.egg-info/
+*.eggs/
+*.whl
+
+BackroomsLogs
+BackroomsLogs/*
+path
+.env
+.vscode
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage results
+htmlcov/
+.coverage
+.coverage.*
+.cache
+.nox/
+pytest_cache/
+.tox/
+
+# IDE / Editor specific files (like PyCharm, VSCode, etc.)
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Local testing (if you use Docker locally)
+docker-compose.override.yml
+
+# Ignore credentials and sensitive configuration files (e.g., if you use dotenv for local settings)
+.env.local
+.env.development
+.env.qa
+.env.production
+
+# Pyinstaller files (for building binaries in Python CLI projects)
+*.spec
+pyinstaller/
+
+# Wheel packaging
+*.wheel/
+
+# Poetry specific (if using Poetry as the package manager)
+poetry.lock
+
+# Coverage reports
+.coverage
+coverage.xml
+*.cover  # Coverage extension files
+
+# PyTest cache
+.cache/
+
+# Sphinx documentation (if using for documentation generation)
+docs/_build/
