@@ -48,9 +48,9 @@ mongo_client = MongoClient(mongo_uri)
 db = mongo_client['degen']
 
 # Collections
-users = db['users']
-conversations = db['conversations']
-messages = db['messages']
+users = db['User']
+conversations = db['Conversation']
+messages = db['Message']
 
 # Model configuration from original script
 MODEL_INFO = {
@@ -72,6 +72,46 @@ MODEL_INFO = {
     "o1-preview": {"api_name": "o1-preview", "display_name": "O1", "company": "openai"},
     "o1-mini": {"api_name": "o1-mini", "display_name": "Mini", "company": "openai"},
 }
+
+def authenticate_session(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        auth_header = request.headers.get('Authorization')
+
+        print(auth_header)
+        
+        if not auth_header or not auth_header.startswith('Bearer '):
+            return jsonify({
+                "status": "error",
+                "message": "Missing or invalid authorization header"
+            }), 401
+            
+        session_token = auth_header.split(' ')[1]
+        current_time = datetime.now(timezone.utc)
+
+        print(f"Current time: {current_time}")
+
+        # Look up session in MongoDB
+        session = db['Session'].find_one({  # Changed from 'sessions' to 'Session'
+            "sessionToken": session_token,
+            "expires": {"$gt": current_time}  # Check if session is still valid
+        })
+        
+        if not session:
+            return jsonify({
+                "status": "error", 
+                "message": "Invalid or expired session"
+            }), 401
+            
+        # Add session info to request context
+        g.session = session
+        g.user_id = session.get('userId')
+
+        print(f"Global user: {session.get('userId')}")
+        
+        return f(*args, **kwargs)
+        
+    return decorated_function
 
 def claude_conversation(actor: str, model: str, context: List[Dict[str, str]], system_prompt: Optional[str] = None) -> str:
     messages = [{"role": m["role"], "content": m["content"]} for m in context]
@@ -149,6 +189,7 @@ def get_available_templates() -> List[str]:
     return templates
 
 @app.route("/api/templates", methods=["GET"])
+@authenticate_session
 def list_templates() -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
     """Get list of available templates"""
     try:
@@ -172,6 +213,7 @@ def list_models() -> Dict[str, Any]:
     })
 
 @app.route("/api/conversation", methods=["POST"])
+@authenticate_session
 def start_conversation() -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
     """Start a new conversation between AI models"""
     try:
@@ -181,7 +223,32 @@ def start_conversation() -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
                 "status": "error",
                 "message": "No JSON data provided"
             }), 400
+        # Validate required fields
+        if "models" not in data:
+            return jsonify({
+                "status": "error", 
+                "message": "Models array is required"
+            }), 400
             
+        if len(data["models"]) < 2:
+            return jsonify({
+                "status": "error",
+                "message": "At least 2 models must be specified"
+            }), 400
+            
+        if "template" not in data:
+            return jsonify({
+                "status": "error",
+                "message": "Template name is required" 
+            }), 400
+            
+        # Get available templates
+        available_templates = get_available_templates()
+        if data["template"] not in available_templates:
+            return jsonify({
+                "status": "error",
+                "message": f"Template '{data['template']}' not found. Available templates: {available_templates}"
+            }), 400
         models = data.get("models", ["opus", "opus"])
         template = data.get("template", "cli")
         max_turns = data.get("max_turns", float("inf"))
@@ -202,20 +269,31 @@ def start_conversation() -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
                 "message": f"Number of models ({len(models)}) does not match template configuration ({len(configs)})"
             }), 400
 
-        # Initialize conversation state
-        conversation_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-        conversation_state = {
-            "id": conversation_id,
+        # Create conversation document in MongoDB
+        conversation_doc = {
             "models": models,
-            "lm_models": [MODEL_INFO[model]["api_name"] for model in models],
-            "lm_display_names": [f"{MODEL_INFO[model]['display_name']} {i+1}" for i, model in enumerate(models)],
-            "system_prompts": [config["system_prompt"] for config in configs],
+            "template": template,
+            "status": "active", 
+            "createdAt": datetime.now(timezone.utc),
+            "updatedAt": datetime.now(timezone.utc),
+            "lmModels": [MODEL_INFO[model]["api_name"] for model in models],
+            "lmDisplayNames": [f"{MODEL_INFO[model]['display_name']} {i+1}" for i, model in enumerate(models)],
+            "systemPrompts": [config["system_prompt"] for config in configs],
             "contexts": [config["context"] for config in configs],
+            "maxTurns": max_turns,
             "turn": 0,
-            "max_turns": max_turns
+            "userId": g.user_id # Assuming user ID is stored in g.user_id
         }
 
-        app.conversations[conversation_id] = conversation_state
+        # Insert into MongoDB
+        try:
+            result = conversations.insert_one(conversation_doc)
+            conversation_id = str(result.inserted_id)
+        except Exception as e:
+            return jsonify({
+                "status": "error", 
+                "message": f"Failed to create conversation: {str(e)}"
+            }), 500
 
         return jsonify({
             "status": "success",
@@ -230,49 +308,72 @@ def start_conversation() -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
         }), 500
 
 @app.route("/api/conversation/<conversation_id>/next", methods=["POST"])
+@authenticate_session
 def next_turn(conversation_id: str) -> Union[Dict[str, Any], tuple[Dict[str, Any], int]]:
     """Generate the next turn in the conversation"""
     try:
-        if conversation_id not in app.conversations:
+        # Get conversation from MongoDB
+        conversation = conversations.find_one({"_id": ObjectId(conversation_id)})
+        
+        if not conversation:
             return jsonify({
                 "status": "error",
                 "message": "Conversation not found"
             }), 404
-
-        state = app.conversations[conversation_id]
-        
-        if state["turn"] >= state["max_turns"]:
+            
+        if conversation["turn"] >= conversation["maxTurns"]:
             return jsonify({
-                "status": "error",
+                "status": "error", 
                 "message": "Maximum turns reached"
             }), 400
 
         responses = []
-        for i in range(len(state["models"])):
+        for i in range(len(conversation["models"])):
             lm_response = generate_model_response(
-                state["lm_models"][i],
-                state["lm_display_names"][i],
-                state["contexts"][i],
-                state["system_prompts"][i]
+                conversation["lmModels"][i],
+                conversation["lmDisplayNames"][i],
+                conversation["contexts"][i],
+                conversation["systemPrompts"][i]
             )
             
             # Update contexts
-            for j, context in enumerate(state["contexts"]):
+            for j, context in enumerate(conversation["contexts"]):
                 if j == i:
                     context.append({"role": "assistant", "content": lm_response})
                 else:
                     context.append({"role": "user", "content": lm_response})
             
+            # Create message document
+            message_doc = {
+                "conversationId": ObjectId(conversation_id),
+                "actor": conversation["lmDisplayNames"][i],
+                "content": lm_response,
+                "createdAt": datetime.now(timezone.utc)
+            }
+            
+            # Insert message into MongoDB
+            messages.insert_one(message_doc)
+            
             responses.append({
-                "actor": state["lm_display_names"][i],
+                "actor": conversation["lmDisplayNames"][i],
                 "response": lm_response
             })
 
-        state["turn"] += 1
+        # Update conversation in MongoDB
+        conversations.update_one(
+            {"_id": ObjectId(conversation_id)},
+            {
+                "$inc": {"turn": 1},
+                "$set": {
+                    "contexts": conversation["contexts"],
+                    "updatedAt": datetime.now(timezone.utc)
+                }
+            }
+        )
 
         return jsonify({
             "status": "success",
-            "turn": state["turn"],
+            "turn": conversation["turn"] + 1,
             "responses": responses
         })
 
